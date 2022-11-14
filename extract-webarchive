@@ -1,6 +1,6 @@
 #!/usr/bin/env php
 <?php
-  # decrypt-all-files.php
+  # extract-webarchive
   #
   # Copyright (c) 2022, Yahe
   # All rights reserved.
