@@ -1,0 +1,252 @@
+#!/usr/bin/env php
+<?php
+  # decrypt-all-files.php
+  #
+  # Copyright (c) 2022, Yahe
+  # All rights reserved.
+  #
+  # usage:
+  # ======
+  #
+  # ./extract-webarchive filename targetdir
+  #
+  # description:
+  # ============
+  #
+  # This script implements a simple way to extract `*.webarchive` files on macOS.
+
+  define("MIMEEXT", initMimeExt("https://svn.apache.org/repos/asf/httpd/httpd/trunk/docs/conf/mime.types"));
+
+  function concatPath($directory, $file) {
+    if (0 < strlen($directory)) {
+      if ("/" !== $directory[strlen($directory)-1]) {
+        $directory .= "/";
+      }
+    }
+
+    if (0 < strlen($file)) {
+      if ("/" === $file[0]) {
+        $file = substr($file, 1);
+      }
+    }
+
+    return $directory.$file;
+  }
+
+  function initMimeExt($url) {
+    $result = [];
+
+    $file = file($url, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    if (false !== $file) {
+      foreach ($file as $line) {
+        # simplify handling
+        $line = strtolower(trim($line));
+
+        # ignore commented lines
+        if (0 !== strpos($line, "#")) {
+          # explode by tabs
+          $line = explode("\t", $line);
+
+          # only proceed if there are several entries
+          if (2 <= count($line)) {
+            # take the relevant entries
+            $left  = trim($line[0]);
+            $right = trim($line[count($line)-1]);
+
+            # is there more than one extension?
+            if (0 < strpos($right, " ")) {
+              # only take the first one
+              $right = trim(explode(" ", $right)[0]);
+            }
+
+            # make sure that there are no empty fields
+            if ((0 < strlen($left)) && (0 < strlen($right))) {
+              $result[$left] = $right;
+            }
+          }
+        }
+      }
+    }
+
+    return $result;
+  }
+
+  function isDirname($path) {
+    return ("/" === $path[strlen($path)-1]);
+  }
+
+  function mime2ext($mimetype) {
+    $result = "";
+
+    if (array_key_exists(strtolower($mimetype), MIMEEXT)) {
+      $result = ".".MIMEEXT[$mimetype];
+    }
+
+    return $result;
+  }
+
+  function println($string) {
+    print($string.PHP_EOL);
+  }
+
+  function url2path($targetdir, $url, $mimetype) {
+    $result = null;
+
+    $url = parse_url($url);
+    if (is_array($url)) {
+      $result = concatPath($targetdir, concatPath($url["scheme"], concatPath($url["host"], $url["path"])));
+
+      # make sure that we get a proper filename
+      if (isDirname($result)) {
+        $result = concatPath(dirname($result), basename($result)).mime2ext($mimetype);
+      }
+    }
+
+    return $result;
+  }
+
+  function extractWebarchive($filename, $targetdir) {
+    $result = false;
+
+    # convert webarchive to xml
+    if (false !== exec("plutil -convert xml1 -o - ".escapeshellarg($filename), $xml, $returncode)) {
+      if (0 === $returncode) {
+        # parse XML
+        $object = simplexml_load_string(implode(PHP_EOL, $xml), null, LIBXML_PARSEHUGE);
+        if (false !== $object) {
+          # assume success unless an error occurs
+          $result = true;
+
+          $content = "";
+          $array   = $object->xpath("/plist/dict/key[text()='WebMainResource']/following-sibling::dict[1]/key[text()='WebResourceData']/following-sibling::data[1]");
+          if (is_array($array)) {
+            foreach ($array as $element) {
+              $content .= base64_decode($element);
+            }
+
+            $mimetype = "";
+            $array    = $object->xpath("/plist/dict/key[text()='WebMainResource']/following-sibling::dict[1]/key[text()='WebResourceMIMEType']/following-sibling::string[1]");
+            if (is_array($array)) {
+              foreach ($array as $element) {
+                $mimetype .= $element;
+              }
+
+              $filename = "";
+              $array    = $object->xpath("/plist/dict/key[text()='WebMainResource']/following-sibling::dict[1]/key[text()='WebResourceURL']/following-sibling::string[1]");
+              if (is_array($array)) {
+                foreach ($array as $element) {
+                  $filename .= $element;
+                }
+                $filename = url2path($targetdir, $filename, $mimetype);
+
+                println("INFO: $filename");
+
+                # create the target directory if it does not exist
+                if (is_dir(dirname($filename)) || mkdir(dirname($filename), 0755, true)) {
+                  # store the content in the target file
+                  if (!file_put_contents($filename, $content)) {
+                    println("ERROR: target file could not be created");
+                    $result = false;
+                  }
+                } else {
+                  println("ERROR: target directory could not be created");
+                  $result = false;
+                }
+              } else {
+                println("ERROR: main resource url could not be extracted");
+                $result = false;
+              }
+            } else {
+              println("ERROR: main resource mime type could not be extracted");
+              $result = false;
+            }
+          } else {
+            println("ERROR: main resource data could not be extracted");
+            $result = false;
+          }
+
+          $counter = count($object->xpath("/plist/dict/key[text()='WebSubresources']/following-sibling::array/dict"));
+          for ($index = 1; $index <= $counter; $index++) {
+            $content = "";
+            $array   = $object->xpath("/plist/dict/key[text()='WebSubresources']/following-sibling::array/dict[$index]/key[text()='WebResourceData']/following-sibling::data[1]");
+            if (is_array($array)) {
+              foreach ($array as $element) {
+                $content .= base64_decode($element);
+              }
+
+              $mimetype = "";
+              $array    = $object->xpath("/plist/dict/key[text()='WebSubresources']/following-sibling::array/dict[$index]/key[text()='WebResourceMIMEType']/following-sibling::string[1]");
+              if (is_array($array)) {
+                foreach ($array as $element) {
+                  $mimetype .= $element;
+                }
+
+                $filename = "";
+                $array   = $object->xpath("/plist/dict/key[text()='WebSubresources']/following-sibling::array/dict[$index]/key[text()='WebResourceURL']/following-sibling::string[1]");
+                if (is_array($array)) {
+                  foreach ($array as $element) {
+                    $filename .= $element;
+                  }
+                  $filename = url2path($targetdir, $filename, $mimetype);
+
+                  println("INFO: $filename");
+
+                  # create the target directory if it does not exist
+                  if (is_dir(dirname($filename)) || mkdir(dirname($filename), 0755, true)) {
+                    # store the content in the target file
+                    if (!file_put_contents($filename, $content)) {
+                      println("ERROR: target file could not be created");
+                      $result = false;
+                    }
+                  } else {
+                    println("ERROR: target directory could not be created");
+                    $result = false;
+                  }
+                } else {
+                  println("ERROR: sub-resource url could not be extracted");
+                  $result = false;
+                }
+              } else {
+                println("ERROR: sub-resource mime type could not be extracted");
+                $result = false;
+              }
+            } else {
+              println("ERROR: sub-resource data could not be extracted");
+              $result = false;
+            }
+          }
+        }
+      }
+    }
+
+    return $result;
+  }
+
+  function main($arguments) {
+    $result = 0;
+
+    if (3 <= count($arguments)) {
+      if (is_file($arguments[1])) {
+        if (is_dir($arguments[2])) {
+          if (!extractWebarchive($arguments[1], $arguments[2])) {
+            println("ERROR: webarchive extraction failed");
+            $result = 4;
+          }
+        } else {
+          println("ERROR: targetdir does not exist");
+          $result = 3;
+        }
+      } else {
+        println("ERROR: filename does not exist");
+        $result = 2;
+      }
+    } else {
+      println("ERROR: missing arguments");
+      $result = 1;
+    }
+
+    return $result;
+  }
+
+  exit(main($argv));
+
